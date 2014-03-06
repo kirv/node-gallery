@@ -20,7 +20,7 @@
   <ul class="albums">
     <% album.albums.forEach(function(album){ %>
       <li class="thumb">
-        <a href="<%= rootDir%>/<%= album.path%>">
+        <a href="<%= dir%>/<%= album.path%>">
           <div class="image"><img src="/<%= directory %>/<%= album.thumb %>&tn=1" alt="<%= album.prettyName %>"><br /></div>
           <span class="caption"><%= album.prettyName %></span>
         </a>
@@ -33,8 +33,8 @@
   <ul class="photos">
     <% album.photos.forEach(function(photo){ %>
       <li class="thumb">
-        <a href="<%=rootDir %><%= photo.path %>">
-          <img src="/<%= directory %>/<%= photo.path %>&tn=1" alt="<%= photo.name%>"><br />
+        <a href="<%=dir %><%= photo.path %>/_.jpg">
+          <img src="/<%= directory %>/<%= photo.path %>/t.jpg&tn=1" alt="<%= photo.name%>"><br />
           <%= photo.name%>
         </a>
       </li>
