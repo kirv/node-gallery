@@ -3,7 +3,7 @@ exif = require('./exif.js'),
 walk = require('walk'),
 util = require('util'),
 path = require('path'),
-im = require('imagemagick');
+gm = require('gm');
 
 var gallery = {
   /*
@@ -44,6 +44,7 @@ var gallery = {
    * Filter string to use for excluding filenames. Defaults to a regular expression that excludes dotfiles.
    */
   filter: /^Thumbs.db|^\.[a-zA-Z0-9]+/,
+
   /*
    * Object used to store binary chunks that represent image thumbs
    */
@@ -52,80 +53,134 @@ var gallery = {
    * Private function to walk a directory and return an array of files
    */
   readFiles: function(params, cb){
-    var files   = [],
-    directoryPath = (this.static) ? this.static + "/" + this.directory : this.directory,
-    me = this;
+    var files = []
+    , directoryPath = (this.static) ? this.static + "/" + this.directory : this.directory
+    , links = []
+    , me = this
+    , obtype
+    , objects = [];
 
+    try{
+      obtype = fs.readlinkSync(directoryPath + "/^");
+    }catch(e){
+      return cb('no object type symlink ^')
+    }
+    if ( obtype != 'Photo-Gallery' )
+      return cb("obtype ^ is not 'Photo-Gallery'")
+
+    // use album.json if found instead of walking files and directories:
+    try{
+      return cb(null, JSON.parse(fs.readFileSync(directoryPath + "/album.json")));
+    }catch(e){
+      // there was no album.json, so continue processing
+    }
 
     var walker  = walk.walk(directoryPath, { followLinks: false });
+
+ // walker.on("symbolicLink", function (root, symlinksStat, next) {
+ //   console.log('SYMLINK: ' + root + ':');
+ //   console.log(symlinksStat.name);
+ //   console.log(symlinksStat);
+ //   next();
+ // });
 
     walker.on("directories", function (root, dirStatsArray, next) {
       // dirStatsArray is an array of `stat` objects with the additional attributes
       // * type
       // * error
       // * name
-
+   // console.log(dirStatsArray);
       next();
     });
 
-
+    // each Photo-Gallery Photo object containing: _.jpg t.jpg m.jpg ^, where:
+    //   _.jpg -> original jpeg
+    //   t.jpg -> thumbnail
+    //   m.jpg -> medium
+    //   ^ -> Photo, the thinobject type
 
     walker.on('file', function(root, stat, next) {
-      if (stat.name.match(me.filter) != null){
+      var dirs = root.replace(directoryPath + "/", "").split("/"),
+        ob;
+
+      if (stat.name.match(/^_\.jpg$/i)){
+        ob = {
+          type: 'Photo',
+          name: dirs.pop(),
+          dir: dirs.join('/')
+        };
+        objects.push(ob);
         return next();
       }
 
-      // Make the reference to the root photo have no ref to this.directory
+      if (stat.name.match(/^_\.(avi|mov)$/i)){
+        ob = {
+          type: 'Movie',
+          name: dirs.pop(),
+          dir: dirs.join('/')
+        };
+        objects.push(ob);
+        return next();
+      }
 
-      var rootlessRoot = root.replace(directoryPath + "/", "");
-      rootlessRoot = rootlessRoot.replace(directoryPath, "");
+      if (stat.name.match(/^.\.jpg$/i)){
+        // ignore other one-character jpeg files
+        return next();
+      }
 
-      var file = {
-        type: stat.type,
+      if (!stat.name.match(/\.jpg$/i)){
+        // ignore any non-jpeg files
+        return next();
+      }
+
+      // finally, store list of remaining jpeg files with longer names:
+
+      ob = {
+        type: 'Jpeg',
         name: stat.name,
-        rootDir: rootlessRoot
+        dir: dirs.join('/')
       };
-
-      files.push(file);
+      objects.push(ob);
       return next();
-
     });
 
     walker.on('end', function() {
-      return cb(null, files);
+      return cb(null, objects);
     });
   },
   /*
-   * Private function to build an albums object from the files[] array
+   * Private function to build an albums object from the objects[] array
    */
-  buildAlbums: function(files, cb){
-    var albums = {
+  buildAlbums: function(objects, cb){
+    var dirHash = {}, albums = {
       name: this.name,
       prettyName: this.name,
       isRoot: true,
       path: this.directory,
       photos: [],
+      jpegs: [],
       albums: []
-    },
-    dirHash = {};
-    for (var i=0; i<files.length; i++){
+    };
+ // console.log(objects);
+    for (var i=0; i<objects.length; i++){
       // Process a single file
-      var file = files[i],
-      dirs = file.rootDir.split("/"),
-      dirHashKey = "",
-      curAlbum = albums; // reset current album to root at each new file
+      var ob = objects[i]
+      , dirs = ob.dir.split("/")
+      , dirHashKey = ""
+      , curAlbum = albums; // reset current album to root at each new file
 
-      // Iterate over it's directory path, checking if we've got an album for each
+      // Iterate over the directory path, checking if we've got an album for each
       // ""!==dirs[0] as we don't want to iterate if we have a file that is a photo at root
-      for (var j=0; j<dirs.length && dirs[0]!==""; j++){
+      for (var j=0; j<dirs.length; j++){
         var curDir = dirs[j];
         dirHashKey += curDir;
 
-
         if (!dirHash.hasOwnProperty(dirHashKey)){
           // If we've never seen this album before, let's create it
-          var currentAlbumPath = dirs.slice(0, j+1).join('/'); // reconstruct the current path with the path slashes
-          dirHash[dirHashKey] = true // TODO - consider binding the album to this hash, and even REDIS-ing..
+          // first reconstruct the current path with the path slashes
+          var currentAlbumPath = dirs.slice(0, j+1).join('/');
+          dirHash[dirHashKey] = true;
+          // TODO - consider binding the album to this hash, and even REDIS-ing..
 
           var newAlbum = {
             name: curDir,
@@ -134,6 +189,7 @@ var gallery = {
             hash: dirHashKey,
             path: currentAlbumPath,
             photos: [],
+            jpegs: [],
             albums: []
           };
 
@@ -152,40 +208,38 @@ var gallery = {
           }
         }
       }
-      var filepath = file.rootDir + '/' + file.name
-      if(file.name == "info.json") {
-        var fullPath = gallery.directory + "/" + filepath;
-        fullPath = (gallery.static) ? gallery.static + "/" + fullPath: fullPath;
-        var info = fs.readFileSync(fullPath);
-        try{
-          info = JSON.parse(info);
-        }catch(e){
-          // If invalid JSON, just bail..
-          continue;
-        }
-        curAlbum.description = info.description || null;
-        curAlbum.prettyName = info.name || curAlbum.prettyName;
+      var obpath = ob.dir + '/' + ob.name
 
-        if (info.thumb || info.thumbnail){
-          var thumbnailImage = info.thumb || info.thumbnail;
-          thumbnailImage = curAlbum.path + "/" + thumbnailImage;
-          curAlbum.thumb = thumbnailImage;
-        }
-
-      } else {
-        var photoName = file.name.replace(/.[^\.]+$/, "");
-        var photo = {
-          name: photoName,
-          path: filepath
+      if(ob.type == "Symlink") {
+        if ( ob.name = 'description' ) curAlbum.description = ob.value.replace(/^=/,'');
+        if ( ob.name = 'prettyname' ) curAlbum.prettyName = ob.value.replace(/^=/,'');
+        if ( ob.name = 'thumbnail' ) curAlbum.thumb = ob.value;
+      }
+      else if(ob.type == "Jpeg") {
+        // the Jpeg object is an image file, should be duplicated in a Photo object
+        // each Photo object was generated from a Jpeg file, hardlinked as _.jpg
+        var jpeg = {
+          name: ob.name,
+          path: obpath
         };
+     // console.log('JPEG: ' + jpeg.name + ' @ ' +jpeg.path);
+        curAlbum.jpegs.push(jpeg);
+      
+      }
+      else if(ob.type == "Photo") {
+        var photo = {
+          name: ob.name,
+          path: obpath
+        };
+        // the Photo object is a directory with _.jpg, t.jpg, ...
   
         //curAlbum.photos.push(photo);
   
-        // we have a photo object - let's try get it's exif data. We've
+        // we have a photo object - let's try get its exif data. We've
         // already pushed into curAlbum, no rush getting exif now!
         // Create a closure to give us scope to photo
         (function(photo, curAlbum){
-          var fullPath = gallery.directory + "/" + photo.path;
+          var fullPath = gallery.directory + "/" + photo.path + '/_.jpg';
           fullPath = (gallery.static) ? gallery.static + "/" + fullPath: fullPath;
   
           exif(fullPath, photo, function(err, exifPhoto){
@@ -197,17 +251,37 @@ var gallery = {
       }
     }
 
-
-    // Function to iterate over our completed albums, calling _buildThumbnails on each
+    // fn to iterate over our completed albums, calling _buildThumbnails on each
     function _recurseOverAlbums(al){
 
       if (!al.thumb){
-        al.thumb = _buildThumbnails(al); // only set this album's thumbanil if not already done in info.json
+        al.thumb = _buildThumbnails(al);
       }
 
       if (al.albums.length>0){
         for (var i=0; i<al.albums.length; i++){
           _recurseOverAlbums(al.albums[i]);
+        }
+      }
+      if (al.jpegs.length>0){
+        console.log(al.jpegs.length + ' JPEGS, '
+                  + al.photos.length + ' PHOTOS in ALBUM ' + al.name );
+        for (var i=0; i<al.jpegs.length; i++){
+          var ob = al.jpegs[i].name.replace(/\.jpg/i, '');
+       // console.log('   ' + al.jpegs[i].name);
+          for (var j=0; j<al.photos.length; j++){
+            if ( al.photos[j].name === ob ) break;
+          }
+          if ( j<al.photos.length ) continue;
+          jpeg = [me.static, me.directory, al.jpegs[i].path].join('/');
+          ob = [me.static, me.directory, al.jpegs[i].path.replace(/\.jpg/i, '')].join('/');
+          console.log('  CREATE OBJECT ' + ob);
+          try{
+            fs.mkdirSync(ob);
+           }catch(e){
+             console.log(e);
+           }
+          fs.linkSync(jpeg,ob + '/_.jpg');
         }
       }
     }
@@ -240,8 +314,8 @@ var gallery = {
    */
   init: function(params, cb){
     var me =  this,
-    directory = params.directory,
-    staticDir = params.static;
+      dir = params.directory.replace(/^\/+/,"").replace(/\/+$/,""),
+      sdir =   params.static.replace(/^\/+/,"").replace(/\/+$/,"");
 
     if (!cb || typeof cb !=="function"){
       cb = function(err){
@@ -251,39 +325,27 @@ var gallery = {
       };
     }
 
-    if (!directory) throw new Error('`directory` is a required parameter');
+    if (!dir) throw new Error('`directory` is a required parameter');
 
-    // Massage our static directory and directory params into our expected format
-    // might be easier by regex..
-    if (staticDir && staticDir.charAt(0)==="/"){
-      staticDir = staticDir.substring(1, staticDir.length);
-    }
-    if (directory.charAt(0)==="/"){
-      directory = directory.substring(1, directory.length);
-    }
-    if (directory.charAt(directory.length-1)==="/"){
-      directory.substring(0, directory.length-1); // yes length-1 - .lenght is the full string remember
-    }
-    if (staticDir.charAt(staticDir.length-1)==="/"){
-      staticDir.substring(0, staticDir.length-1); // yes length-1 - .lenght is the full string remember
-    }
     this.rootURL = params.rootURL;
-    this.directory = directory;
-    this.static = staticDir;
+    this.directory = params.directory.replace(/^\/+/,"").replace(/\/+$/,""),
+    this.static       = params.static.replace(/^\/+/,"").replace(/\/+$/,"");
     this.name = params.name || this.name;
-
 
     this.filter = params.filter || this.filter;
 
-    this.readFiles(null, function(err, files){
+    this.readFiles(null, function(err, objects){
       if (err){
         return cb(err);
       }
+   // console.log("OBJECTS:"); console.log(objects);
 
-      me.buildAlbums(files, function(err, album){
+      me.buildAlbums(objects, function(err, album){
         me.album = album;
+        console.log("ALBUM"); console.log(album);
         return cb(err, album);
       })
+ // console.log('quitting for debug'); process.exit(2);
     });
   },
   /*
@@ -294,8 +356,8 @@ var gallery = {
    */
   getPhoto: function(params, cb){
     // bind the album name to the request
-    var photoName = params.photo.replace(/.[^\.]+$/, ""), // strip the extension
-    albumPath = params.album;
+    var photoName = params.photo.replace(/\/.\.[^\.]+$/, "")
+    , albumPath = params.album;
     this.getAlbum(params, function(err, data){
       if (err){
         return cb(err);
@@ -329,7 +391,6 @@ var gallery = {
     }
 
     var dirs = albumPath.split('/');
-
 
     for (var i=0; i<dirs.length; i++){
       var dir = dirs[i];
@@ -376,7 +437,7 @@ var gallery = {
 
     data.name = this.name;
     data.directory= this.directory;
-    data.rootDir = this.rootURL;
+    data.dir = this.rootURL;
 
     return cb(err, data);
   },
@@ -391,38 +452,37 @@ var gallery = {
       requestParams = {},
       image = false;
 
-
-
       var staticTest = /\.png|\.jpg|\.css|\.js/i;
       if (rootURL=="" || url.indexOf(rootURL)===-1 /*|| staticTest.test(url)*/){
 
-//     This isn't working just quite yet, let's skip over it
-        var thumbTest =  /[a-zA-Z0-9].*(\.png|\.jpg)&tn=1/i;
+        var thumbTest =  /\bt\.jpg&tn=1/i;
         if (thumbTest.test(url)){
           url = req.url = url.replace("&tn=1", "");
           var imagePath = me.static + decodeURI(url);
-          if (me.imageCache[imagePath]){
-            res.contentType('image/jpg');
-            res.end(me.imageCache[imagePath], 'binary');
-          }else{
-            fs.readFile(imagePath, 'binary', function(err, file){
-              if (err){
-                console.log(err);
-                return res.send(err);
-              }
-              im.resize({
-                srcData: file,
-                width:   256
-              }, function(err, binary, stderr){
-                if (err){
-                  util.inspect(err);
-                  res.send('error generating thumb');
-                }
+       // if (me.imageCache[imagePath]){
+          if (fs.existsSync(imagePath)) {
+            fs.readFile(imagePath, function(err, data) {
+              if(err) {
+                res.send('error reading thumb');
+              } else {
+                // set the content type based on the file
                 res.contentType('image/jpg');
-                res.end(binary, 'binary');
-                me.imageCache[imagePath] = binary;
-              });
+                res.send(data);
+              }   
+              res.end();
             });
+          }else{
+	    var original = imagePath.replace('t.jpg', '_.jpg');
+            gm(original)
+              .resize(256)
+              .write(imagePath, function(err, file){
+                if (err){
+                  console.log(err);
+                  return res.send(err);
+                }
+                res.contentType('text/plain');
+                res.send('creating thumbnail');
+              });
           }
           return;
         }
@@ -431,19 +491,22 @@ var gallery = {
       }
 
       url = url.replace(rootURL, "");
-      // Do some URL massaging - wouldn't have to do this if .params were accessible?
       if (url.charAt(0)==="/"){
         url = url.substring(1, url.length);
       }
       url =decodeURIComponent(url);
 
+
       if (url && url!==""){
-        var filepath = url.trim(),
-        isFile = /\b.(jpg|bmp|jpeg|gif|png|tif)\b$/;
-        image = isFile.test(filepath.toLowerCase());
+        var filepath = url.trim()
+        , isFile = /\.(jpg|bmp|jpeg|gif|png|tif)$/i
+        , istob = /.\.jpg$/i;
+     // image = isFile.test(filepath.toLowerCase());
+        image = isFile.test(filepath);
         filepath = filepath.split("/");
         if (image){ // If we detect image file name at end, get filename
           image = filepath.pop();
+          if ( istob.test(image) ) image = filepath.pop() + '/' + image;
         }
         filepath = filepath.join("/").trim();
 
