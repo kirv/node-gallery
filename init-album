@@ -1,0 +1,43 @@
+#!/bin/bash
+
+error() { printf "%s\n" "$@"; exit 1; }
+
+while [[ ${1:0:1} == - ]]; do
+    case $1 in
+        -r) recurse=1;;
+        -h) ;;
+    esac
+    shift;
+done
+
+album="$1"
+echo ALBUM is $album
+
+[[ -d $album ]] || error "no album directory '$album' found"
+
+## album exists, but is it a thinbobject photo gallery?
+
+## it ought to at least contain some jpegs...
+shopt -s nocaseglob nullglob
+jpegs=("$album"/*jpg)
+
+(( ${#jpegs[@]} )) && {
+    [[ -L $album/^ ]] || ln -ns Photo-Gallery "$album/^"
+    [[ $(readlink "$album/^") == Photo-Gallery ]] ||
+        error "album thinobject type ^ is not Photo-Gallery"
+
+    for p in "${jpegs[@]}"; do 
+        ob=${p%.*}
+        [[ -d $ob ]] && continue
+        mkdir "$ob" || error "failed to create $ob"
+        ln "$p" "$ob/_.jpg"
+    done
+}
+
+[[ -n $recurse ]] || exit 0
+
+for d in "$album"/*/; do 
+    # we want albums, not photos:
+    [[ -e "$d/_.jpg" ]] && continue
+    $0 -r "$d"
+done

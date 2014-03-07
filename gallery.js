@@ -263,6 +263,7 @@ var gallery = {
           _recurseOverAlbums(al.albums[i]);
         }
       }
+      // scan list of jpegs and compare with Photo objects
       if (al.jpegs.length>0){
         console.log(al.jpegs.length + ' JPEGS, '
                   + al.photos.length + ' PHOTOS in ALBUM ' + al.name );
@@ -273,6 +274,8 @@ var gallery = {
             if ( al.photos[j].name === ob ) break;
           }
           if ( j<al.photos.length ) continue;
+          console.log(al.jpegs[i].name + ' has not been initialized');
+          /*
           jpeg = [me.static, me.directory, al.jpegs[i].path].join('/');
           ob = [me.static, me.directory, al.jpegs[i].path.replace(/\.jpg/i, '')].join('/');
           console.log('  CREATE OBJECT ' + ob);
@@ -282,6 +285,7 @@ var gallery = {
              console.log(e);
            }
           fs.linkSync(jpeg,ob + '/_.jpg');
+          */
         }
       }
     }
